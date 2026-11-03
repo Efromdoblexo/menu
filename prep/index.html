@@ -89,7 +89,7 @@ let counts = ls.get(K.counts,{});            // {item:number}
 let pending = ls.get(K.pend,{});             // {item:true}
 let pendingClear = ls.get(K.clr,false);
 let pin = ls.get(K.pin,"");
-let syncing = false, needPin = false, offline = false;
+let syncing = false, needPin = false, offline = false, lastErr = "";
 
 const $ = id => document.getElementById(id);
 const cnt = n => Number(counts[n])||0;
@@ -111,7 +111,7 @@ function render(){
 function renderSync(){
   const n=Object.keys(pending).length+(pendingClear?1:0), s=$("sync");
   s.className = n||offline ? "warn" : "";
-  s.textContent = syncing ? "Saving…" : n ? (offline?"Offline – ":"")+n+" change"+(n>1?"s":"")+" waiting to save" : offline?"Offline":"All saved ✓";
+  s.textContent = syncing ? "Saving…" : n ? n+" change"+(n>1?"s":"")+" not saved yet"+(lastErr?" – "+lastErr:"") : offline?(lastErr||"Not connected"):"All saved ✓";
 }
 
 $("list").addEventListener("click",e=>{
@@ -137,8 +137,11 @@ function persist(){ls.set(K.counts,counts);ls.set(K.pend,pending);ls.set(K.clr,p
 
 // ---- Network ---------------------------------------------------------------
 async function post(body){
-  const r = await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({...body,pin})});
-  return r.json();
+  let r;
+  try{ r = await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({...body,pin})}); }
+  catch(e){ throw new Error(navigator.onLine ? "can't reach the script" : "no internet"); }
+  if(!r.ok) throw new Error("script error "+r.status);
+  try{ return await r.json(); }catch(e){ throw new Error("script sent an unreadable reply"); }
 }
 function badPin(j){ return j && j.ok===false && /pin|auth|denied|unauthor/i.test(String(j.error||j.message||"")); }
 function askPin(msg){ needPin=true; ls.del(K.pin); pin=""; showPin(msg||""); }
@@ -151,21 +154,21 @@ async function flush(){
     if(pendingClear){
       const j=await post({action:"clear"});
       if(badPin(j)) throw {pin:1};
-      if(j.ok===false) throw new Error("save failed");
+      if(j.ok===false) throw new Error(String(j.error||j.message||"script refused the save"));
       pendingClear=false; persist();
     }
     for(const n of Object.keys(pending)){
       const sent=cnt(n);
       const j=await post({action:"set",item:n,count:sent});
       if(badPin(j)) throw {pin:1};
-      if(j.ok===false) throw new Error("save failed");
+      if(j.ok===false) throw new Error(String(j.error||j.message||"script refused the save"));
       if(cnt(n)===sent) delete pending[n];   // keep if changed while sending
       persist();
     }
-    offline=false;
+    offline=false; lastErr="";
   }catch(e){
     if(e&&e.pin){ syncing=false; return askPin("That PIN was not accepted. Try again."); }
-    offline=true;
+    offline=true; lastErr=(e&&e.message)||"save failed";
   }
   syncing=false; render();
   if(!offline && (pendingClear||Object.keys(pending).length)) flush();
@@ -174,10 +177,11 @@ async function flush(){
 async function load(){
   if(!pin) return;
   try{
-    const r=await fetch(API+"?action=get&pin="+encodeURIComponent(pin));
-    const j=await r.json();
+    let r; try{ r=await fetch(API+"?action=get&pin="+encodeURIComponent(pin)); }
+    catch(e){ throw new Error(navigator.onLine ? "can't reach the script" : "no internet"); }
+    const j=await r.json().catch(()=>{ throw new Error("script sent an unreadable reply"); });
     if(badPin(j)) return askPin("That PIN was not accepted. Try again.");
-    if(j.ok===false) throw new Error("load failed");
+    if(j.ok===false) throw new Error(String(j.error||j.message||"script refused the request"));
     const src=j.counts||{};
     if(!pendingClear){
       for(const n of ITEMS.map(i=>i[0])){
@@ -186,8 +190,8 @@ async function load(){
         counts[n]=Number(c)||0;
       }
     }
-    persist(); offline=false;
-  }catch(e){ offline=true; }
+    persist(); offline=false; lastErr="";
+  }catch(e){ offline=true; lastErr=(e&&e.message)||"could not load"; }
   render(); flush();
 }
 
@@ -213,7 +217,7 @@ async function submitPin(){
     const r=await fetch(API+"?action=get&pin="+encodeURIComponent(pin));
     const j=await r.json();
     if(badPin(j)){ pin=""; $("pinmsg").textContent="That PIN was not accepted. Try again."; return; }
-  }catch(e){ /* offline: accept and verify later */ }
+  }catch(e){ /* no connection: keep PIN, will verify when connected */ }
   ls.set(K.pin,pin); needPin=false; $("pin").style.display="none"; load();
 }
 
