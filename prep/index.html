@@ -159,7 +159,7 @@ async function flush(){
     }
     for(const n of Object.keys(pending)){
       const sent=cnt(n);
-      const j=await post({action:"set",item:n,count:sent});
+      const j=await post({action:"save",item:n,count:sent});
       if(badPin(j)) throw {pin:1};
       if(j.ok===false) throw new Error(String(j.error||j.message||"script refused the save"));
       if(cnt(n)===sent) delete pending[n];   // keep if changed while sending
@@ -182,7 +182,10 @@ async function load(){
     const j=await r.json().catch(()=>{ throw new Error("script sent an unreadable reply"); });
     if(badPin(j)) return askPin("That PIN was not accepted. Try again.");
     if(j.ok===false) throw new Error(String(j.error||j.message||"script refused the request"));
-    const src=j.counts||{};
+    // Script returns a list: [{item, count, updated}, ...]
+    const src={};
+    if(Array.isArray(j.counts)) j.counts.forEach(r=>{ if(r&&r.item!==undefined) src[String(r.item).trim()]=r.count; });
+    else Object.assign(src,j.counts||{});
     if(!pendingClear){
       for(const n of ITEMS.map(i=>i[0])){
         if(pending[n]) continue;               // unsent local change wins
