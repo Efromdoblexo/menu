@@ -1,1 +1,225 @@
-prep-check.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prep Check – doblexo</title>
+<style>
+:root{--blue:#0118bd;--pink:#FA7DE1;--ink:#111;--bg:#fff;--line:#222;
+--green:#0a6b2c;--yellow:#ffd400;--red:#b00020}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;font-size:24px;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+button{font:inherit;cursor:pointer}
+button:focus-visible{outline:5px solid var(--pink);outline-offset:3px}
+header{background:var(--blue);color:#fff;padding:16px 24px;display:flex;flex-wrap:wrap;gap:12px 20px;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:5}
+h1{margin:0;font-size:36px}
+#sync{font-size:22px;font-weight:700;background:#fff;color:var(--ink);padding:8px 16px;border-radius:999px;border:3px solid var(--pink)}
+#sync.warn{background:var(--yellow)}
+#newcount{min-height:72px;padding:0 28px;font-size:26px;font-weight:800;border:4px solid #fff;border-radius:14px;background:var(--pink);color:#000}
+#newcount.confirm{background:var(--red);color:#fff}
+main{display:grid;grid-template-columns:repeat(auto-fit,minmax(480px,1fr));gap:16px;padding:16px 24px 40px}
+.row{border:4px solid var(--line);border-left-width:16px;border-radius:16px;padding:14px 16px;display:flex;align-items:center;gap:14px;justify-content:space-between;flex-wrap:wrap}
+.row.ready{border-left-color:var(--green)}.row.low{border-left-color:var(--yellow)}.row.make{border-left-color:var(--red)}
+.name{font-size:32px;font-weight:800;line-height:1.1}
+.target{font-size:22px;margin-top:4px}
+.badge{display:inline-block;margin-top:8px;padding:6px 16px;border-radius:10px;font-size:26px;font-weight:800;border:3px solid #000}
+.ready .badge{background:var(--green);color:#fff}
+.low .badge{background:var(--yellow);color:#000}
+.make .badge{background:var(--red);color:#fff}
+.ctl{display:flex;align-items:center;gap:12px}
+.step{width:96px;height:96px;border-radius:18px;border:4px solid #000;background:var(--blue);color:#fff;font-size:56px;font-weight:800;line-height:1}
+.step:active{background:var(--pink);color:#000}
+.step[disabled]{background:#ddd;color:#555;border-color:#555}
+.count{min-width:130px;text-align:center;font-size:44px;font-weight:800}
+.count small{display:block;font-size:20px;font-weight:600}
+#pin{position:fixed;inset:0;background:#fff;z-index:20;display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:16px;overflow:auto}
+#pin h2{margin:0;font-size:36px}
+#pinmsg{min-height:34px;font-size:26px;font-weight:700;color:var(--red);text-align:center}
+#dots{font-size:52px;letter-spacing:10px;min-height:64px;border:4px solid #000;border-radius:14px;padding:0 24px;min-width:320px;text-align:center}
+.pad{display:grid;grid-template-columns:repeat(3,120px);gap:12px}
+.pad button{height:96px;font-size:44px;font-weight:800;border:4px solid #000;border-radius:18px;background:#fff}
+.pad button:active{background:var(--pink)}
+.pad .go{background:var(--blue);color:#fff;font-size:30px}
+@media(max-width:560px){main{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Prep Check</h1>
+  <div id="sync" role="status" aria-live="polite">Loading…</div>
+  <button id="newcount" type="button">Start new count</button>
+</header>
+<main id="list" aria-label="Prep items"></main>
+
+<div id="pin" role="dialog" aria-modal="true" aria-labelledby="pinh">
+  <h2 id="pinh">Enter shop PIN</h2>
+  <div id="pinmsg" role="alert"></div>
+  <div id="dots" aria-live="polite"></div>
+  <div class="pad" id="pad"></div>
+</div>
+
+<script>
+// ---- Settings (edit these) -------------------------------------------------
+const API = "https://script.google.com/macros/s/AKfycbyn8UYhDQ63CznGLY7MqTB7rCmw1gdugNJjRxyXoJ7Y4-QlLxtGZW5O7KIRzoWIZeZWQA/exec";
+// Item name + target, same as the Google Sheet. Targets are in containers.
+const ITEMS = [
+  ["Strawberry Sauce","1/2 container"],["Cookie Butter","1/2 container"],
+  ["Pumpkin Sauce","1/2 container"],["Toasted Coco","1/2 container"],
+  ["Cereal Milk","1/2 container"],["Vanilla","1/2 container"],
+  ["Caramel","1/2 container"],["Lavender","1/2 container"]
+];
+const STEP = 0.25;   // each tap = 1/4 container
+const MAX = 20;
+// ----------------------------------------------------------------------------
+const K = {pin:"dbx_pin", counts:"dbx_counts", pend:"dbx_pending", clr:"dbx_clear"};
+const ls = {
+  get(k,d){try{const v=localStorage.getItem(k);return v===null?d:JSON.parse(v)}catch(e){return d}},
+  set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}},
+  del(k){try{localStorage.removeItem(k)}catch(e){}}
+};
+const parseT = s => { const m=String(s).match(/(\d+)\s*\/\s*(\d+)|(\d+(?:\.\d+)?)/); if(!m) return 1; return m[1]?(+m[1])/(+m[2]):+m[3]; };
+const fmt = n => { let w=Math.floor(n+1e-9), q=Math.round((n-w)*4); if(q===4){w++;q=0}
+  const f=["","1/4","1/2","3/4"][q]; return (w?w:"")+(w&&f?" ":"")+(f||(w?"":"0")); };
+const targets = Object.fromEntries(ITEMS.map(([n,t])=>[n,parseT(t)]));
+
+let counts = ls.get(K.counts,{});            // {item:number}
+let pending = ls.get(K.pend,{});             // {item:true}
+let pendingClear = ls.get(K.clr,false);
+let pin = ls.get(K.pin,"");
+let syncing = false, needPin = false, offline = false;
+
+const $ = id => document.getElementById(id);
+const cnt = n => Number(counts[n])||0;
+function status(n){ const c=cnt(n),t=targets[n]; return c>=t-1e-9?["ready","Ready","✓"]:c>=t/2-1e-9?["low","Running low","!"]:["make","Make more","✕"]; }
+
+function render(){
+  $("list").innerHTML = ITEMS.map(([n,t],i)=>{
+    const [cls,word,sym]=status(n), c=cnt(n);
+    return `<section class="row ${cls}" data-i="${i}" aria-label="${n}">
+      <div><div class="name">${n}</div><div class="target">Target: ${t}</div>
+      <span class="badge">${sym} ${word}</span></div>
+      <div class="ctl">
+        <button class="step" data-d="-1" aria-label="Remove one quarter container from ${n}" ${c<=0?"disabled":""}>−</button>
+        <div class="count" aria-live="polite">${fmt(c)}<small>${c>1?"containers":"container"}</small></div>
+        <button class="step" data-d="1" aria-label="Add one quarter container to ${n}" ${c>=MAX?"disabled":""}>+</button>
+      </div></section>`;}).join("");
+  renderSync();
+}
+function renderSync(){
+  const n=Object.keys(pending).length+(pendingClear?1:0), s=$("sync");
+  s.className = n||offline ? "warn" : "";
+  s.textContent = syncing ? "Saving…" : n ? (offline?"Offline – ":"")+n+" change"+(n>1?"s":"")+" waiting to save" : offline?"Offline":"All saved ✓";
+}
+
+$("list").addEventListener("click",e=>{
+  const b=e.target.closest(".step"); if(!b||b.disabled) return;
+  const n=ITEMS[+b.closest(".row").dataset.i][0];
+  counts[n]=Math.min(MAX,Math.max(0,Math.round((cnt(n)+(+b.dataset.d)*STEP)*4)/4));
+  pending[n]=true; persist(); render(); flush();
+});
+
+// New count (two taps)
+let ct;
+$("newcount").addEventListener("click",()=>{
+  const b=$("newcount");
+  if(!b.classList.contains("confirm")){
+    b.classList.add("confirm"); b.textContent="Tap again to clear all counts";
+    ct=setTimeout(resetBtn,6000); return;
+  }
+  resetBtn(); counts={}; pending={}; pendingClear=true; persist(); render(); flush();
+});
+function resetBtn(){clearTimeout(ct);const b=$("newcount");b.classList.remove("confirm");b.textContent="Start new count";}
+
+function persist(){ls.set(K.counts,counts);ls.set(K.pend,pending);ls.set(K.clr,pendingClear);}
+
+// ---- Network ---------------------------------------------------------------
+async function post(body){
+  const r = await fetch(API,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({...body,pin})});
+  return r.json();
+}
+function badPin(j){ return j && j.ok===false && /pin|auth|denied|unauthor/i.test(String(j.error||j.message||"")); }
+function askPin(msg){ needPin=true; ls.del(K.pin); pin=""; showPin(msg||""); }
+
+async function flush(){
+  if(syncing||needPin||!pin) return;
+  if(!pendingClear && !Object.keys(pending).length) return renderSync();
+  syncing=true; renderSync();
+  try{
+    if(pendingClear){
+      const j=await post({action:"clear"});
+      if(badPin(j)) throw {pin:1};
+      if(j.ok===false) throw new Error("save failed");
+      pendingClear=false; persist();
+    }
+    for(const n of Object.keys(pending)){
+      const sent=cnt(n);
+      const j=await post({action:"set",item:n,count:sent});
+      if(badPin(j)) throw {pin:1};
+      if(j.ok===false) throw new Error("save failed");
+      if(cnt(n)===sent) delete pending[n];   // keep if changed while sending
+      persist();
+    }
+    offline=false;
+  }catch(e){
+    if(e&&e.pin){ syncing=false; return askPin("That PIN was not accepted. Try again."); }
+    offline=true;
+  }
+  syncing=false; render();
+  if(!offline && (pendingClear||Object.keys(pending).length)) flush();
+}
+
+async function load(){
+  if(!pin) return;
+  try{
+    const r=await fetch(API+"?action=get&pin="+encodeURIComponent(pin));
+    const j=await r.json();
+    if(badPin(j)) return askPin("That PIN was not accepted. Try again.");
+    if(j.ok===false) throw new Error("load failed");
+    const src=j.counts||{};
+    if(!pendingClear){
+      for(const n of ITEMS.map(i=>i[0])){
+        if(pending[n]) continue;               // unsent local change wins
+        const v=src[n]; const c=(v&&typeof v==="object")?v.count:v;
+        counts[n]=Number(c)||0;
+      }
+    }
+    persist(); offline=false;
+  }catch(e){ offline=true; }
+  render(); flush();
+}
+
+// ---- PIN screen ------------------------------------------------------------
+let entry="";
+(function buildPad(){
+  const p=$("pad"); let h="";
+  for(const k of ["1","2","3","4","5","6","7","8","9","⌫","0","Enter"])
+    h+=`<button type="button" data-k="${k}" class="${k==="Enter"?"go":""}" aria-label="${k==="⌫"?"Delete":k}">${k}</button>`;
+  p.innerHTML=h;
+  p.addEventListener("click",async e=>{
+    const b=e.target.closest("button"); if(!b) return; const k=b.dataset.k;
+    if(k==="⌫") entry=entry.slice(0,-1);
+    else if(k==="Enter"){ if(!entry) return; return submitPin(); }
+    else if(entry.length<12) entry+=k;
+    $("dots").textContent="●".repeat(entry.length);
+  });
+})();
+function showPin(msg){ entry=""; $("dots").textContent=""; $("pinmsg").textContent=msg; $("pin").style.display="flex"; }
+async function submitPin(){
+  pin=entry; entry=""; $("dots").textContent=""; $("pinmsg").textContent="Checking…";
+  try{
+    const r=await fetch(API+"?action=get&pin="+encodeURIComponent(pin));
+    const j=await r.json();
+    if(badPin(j)){ pin=""; $("pinmsg").textContent="That PIN was not accepted. Try again."; return; }
+  }catch(e){ /* offline: accept and verify later */ }
+  ls.set(K.pin,pin); needPin=false; $("pin").style.display="none"; load();
+}
+
+// ---- Start -----------------------------------------------------------------
+render();
+if(!pin) { needPin=true; showPin(""); } else load();
+window.addEventListener("online",()=>{offline=false;load();});
+window.addEventListener("offline",()=>{offline=true;renderSync();});
+setInterval(()=>{ if(pin&&!needPin&&(offline||pendingClear||Object.keys(pending).length)) flush(); },15000);
+</script>
+</body>
+</html>
